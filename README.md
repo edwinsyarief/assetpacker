@@ -6,7 +6,9 @@ Asset Packer is a powerful tool designed to streamline the packaging and managem
 
 ## Installation
 
-`go get github.com/edwinsyarief/asset-packer`
+```sh
+go get github.com/edwinsyarief/assetpacker
+```
 
 ### Secure Asset Pipeline
 
