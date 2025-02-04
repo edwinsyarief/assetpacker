@@ -71,3 +71,122 @@ func main() {
 
     fmt.Println("Assets packed and ready for your game!")
 }
+```
+
+## WASM Example
+
+We can also use WASM to load the game assets.
+
+```go
+// Load the game_assets.pak from the web environment
+ assetBin, err := loadAssetPackFromWasm("./game_assets.pak")
+ if err != nil {
+  panic(err)
+ }
+
+ // Initialize the asset reader with the binary data instead of a file path
+ reader, err := asset_packer.NewAssetReaderFromBytes(assetBin, key)
+ if err != nil {
+  panic(err)
+ }
+
+
+func loadAssetPackFromWasm(path string) ([]byte, error) {
+ fmt.Printf("Attempting to load asset from WASM: %s\n", path)
+
+ done := make(chan struct{})
+ var result []byte
+ var err error
+
+ js.Global().Call("fetch", path).Call("then", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+  response := args[0]
+  // Check if the response is OK
+  if !response.Get("ok").Bool() {
+   err = fmt.Errorf("HTTP error, status %d", response.Get("status").Int())
+   close(done)
+   return nil
+  }
+
+  // Convert response to ArrayBuffer
+  response.Call("arrayBuffer").Call("then", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+   jsArrayBuffer := args[0]
+   jsUint8Array := js.Global().Get("Uint8Array").New(jsArrayBuffer)
+
+   // Convert to Go slice
+   result = make([]byte, jsUint8Array.Get("length").Int())
+   js.CopyBytesToGo(result, jsUint8Array)
+   close(done)
+   return nil
+  })).Call("catch", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+   err = fmt.Errorf("failed to convert response to array buffer: %v", args[0].String())
+   close(done)
+   return nil
+  }))
+  return nil
+ })).Call("catch", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+  err = fmt.Errorf("fetch error: %v", args[0].String())
+  close(done)
+  return nil
+ }))
+
+ <-done
+
+ if err != nil {
+  return nil, err
+ }
+
+ fmt.Printf("Fetched data length: %d, first 10 bytes: %v, last 10 bytes: %v\n", len(result), result[:10], result[len(result)-10:])
+
+ // Clean binary data if necessary
+ cleanedData := cleanBinaryData(result)
+
+ return cleanedData, nil
+}
+
+// Clean up the binary data by removing Unicode Replacement Characters
+func cleanBinaryData(data []byte) []byte {
+ var clean []byte
+ for i := 0; i < len(data); {
+  if i+2 < len(data) && data[i] == 239 && data[i+1] == 191 && data[i+2] == 189 {
+   // Skip the three bytes representing the replacement character
+   i += 3
+  } else {
+   clean = append(clean, data[i])
+   i++
+  }
+ }
+ return clean
+}
+```
+
+The HTML script:
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Your Game</title>
+  </head>
+  <body>
+    <script src="wasm_exec.js"></script>
+    <script>
+      console.log(
+        "Go object:",
+        typeof Go !== "undefined" ? "Go exists" : "Go is not defined"
+      );
+      const go = new Go();
+      WebAssembly.instantiateStreaming(
+        fetch("'${{ env.EXECUTABLE_NAME }}'.wasm"),
+        go.importObject
+      )
+        .then((result) => {
+          go.run(result.instance);
+        })
+        .catch((err) => {
+          console.error("Failed to load WASM module:", err);
+        });
+    </script>
+  </body>
+</html>
+```
