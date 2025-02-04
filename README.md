@@ -176,10 +176,7 @@ The HTML script:
         typeof Go !== "undefined" ? "Go exists" : "Go is not defined"
       );
       const go = new Go();
-      WebAssembly.instantiateStreaming(
-        fetch("'${{ env.EXECUTABLE_NAME }}'.wasm"),
-        go.importObject
-      )
+      WebAssembly.instantiateStreaming(fetch("yourgame.wasm"), go.importObject)
         .then((result) => {
           go.run(result.instance);
         })
