@@ -1,189 +1,258 @@
 # Asset Packer
 
-## Overview
+`assetpacker` is a zero-dependency Go library and CLI for packing game assets into a single AES-GCM encrypted, lazily-readable binary archive (`APAK` v2) with automatic backward compatibility for legacy v1 archives.
 
-Asset Packer is a powerful tool designed to streamline the packaging and management of game assets. It provides a seamless workflow for developers, ensuring that assets are efficiently packed and ready for use in the game.
+## Features
+
+- **Versioned Binary Format (`APAK` v2)**:
+  - Fixed header (`"APAK"` + `uint16` version `2` + `uint16` flags)
+  - Sequential AES-GCM encrypted asset payloads with cryptographically random nonces
+  - Per-entry authenticated additional data (AAD) binding `(path, type, rawSize, flags)` to prevent metadata tampering or entry swapping
+  - Encrypted footer Table of Contents (TOC) authenticated with AAD `"APAK-TOC-v2"`
+  - Automatic fallback reader for legacy v1 archives
+- **Lazy On-Demand Loading (`io.ReaderAt`)**:
+  - Opening an archive decrypts only the footer TOC—assets are read and decrypted lazily on demand via `ReadAt`
+  - Optional in-memory caching (`WithCache(true)`) returning defensive copies
+  - Configurable decompression bomb protection (`WithMaxUncompressedSize`, default 256 MiB)
+  - Thread-safe for concurrent reads
+- **Smart Compression**:
+  - Automatically skips gzip for already-compressed formats (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ogg`, `.mp3`, `.flac`, `.aac`, `.m4a`, `.mp4`, `.webm`, `.woff2`, `.zip`, `.gz`, `.br`, `.zst`) or whenever compressed output is not smaller than raw input
+  - Uses `sync.Pool` for `gzip.Writer`, `gzip.Reader`, and scratch buffers
+- **Atomic File Writes & Cross-Platform Paths**:
+  - `PackAssets` writes to a temporary file, syncs, and atomically renames into place
+  - Normalizes Windows/POSIX separators, rejects `..` traversal and duplicate paths, and supports Unicode and colons in virtual paths
+- **Standard Library `io/fs.FS`**:
+  - `*AssetReader` implements `fs.FS`, `fs.ReadFileFS`, `fs.StatFS`, and `fs.ReadDirFS`
 
 ## Installation
+
+Library:
 
 ```sh
 go get github.com/edwinsyarief/assetpacker
 ```
 
-### Secure Asset Pipeline
+CLI tool:
 
-- **Encrypted Assets**: All game assets (images, audio, maps) are encrypted using AES-GCM encryption
-- **Compression**: Assets are automatically compressed using gzip before encryption
-- **Streamlined Loading**: Fast asset loading with built-in decompression and decryption
+```sh
+go install github.com/edwinsyarief/assetpacker/cmd/assetpacker@latest
+```
 
-### Asset Types Support
+## Quick Start
 
-- Sprites and animations
-- Audio files (BGM, SFX)
-- Map data and configurations
-- UI elements and fonts
-
-### Security Features
-
-- AES-GCM authenticated encryption
-- Secure random nonce generation
-- Key rotation support
-- Protected asset integrity
-
-This system ensures your game assets are protected while maintaining excellent performance and developer experience.
-
-## Quick Start Example
-
-Here's a simple example of packing game assets:
+### Packing a Directory (`PackDir`)
 
 ```go
 package main
 
 import (
-    "fmt"
-    "github.com/edwinsyarief/assetpacker"
+	"log"
+
+	"github.com/edwinsyarief/assetpacker"
 )
 
 func main() {
-    // Define your game assets
-    assets := []assetpacker.Asset{
-        {Path: "assets/sprites/player.png", Type: "sprite"},
-        {Path: "assets/audio/background.mp3", Type: "audio"},
-        {Path: "assets/maps/level1.json", Type: "map"},
-    }
+	// AES-256 key (must be 16, 24, or 32 bytes)
+	key := []byte("0123456789abcdef0123456789abcdef")
 
-    // Your secret key (32 bytes)
-    key := []byte("your-secret-key-32-bytes-required!")
-
-    // Pack assets into a single encrypted file
-    err := assetpacker.PackAssets(assets, "game_assets.pak", key)
-    if err != nil {
-        fmt.Printf("Failed to pack assets: %v\n", err)
-        return
-    }
-
-    // Later, in your game code:
-    reader, err := assetpacker.NewAssetReader("game_assets.pak", key)
-    if err != nil {
-        fmt.Printf("Failed to read assets: %v\n", err)
-        return
-    }
-
-    fmt.Println("Assets packed and ready for your game!")
+	err := assetpacker.PackDir(
+		"assets",
+		"game_assets.pak",
+		key,
+		assetpacker.WithExclude("*.aseprite", ".DS_Store", "Thumbs.db"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
-## WASM Example
-
-We can also use WASM to load the game assets.
+### Packing Explicit Assets (`PackAssets` / `PackAssetsToBytes`)
 
 ```go
-// Load the game_assets.pak from the web environment
- assetBin, err := loadAssetPackFromWasm("./game_assets.pak")
- if err != nil {
-  panic(err)
- }
-
- // Initialize the asset reader with the binary data instead of a file path
- reader, err := asset_packer.NewAssetReaderFromBytes(assetBin, key)
- if err != nil {
-  panic(err)
- }
-
-
-func loadAssetPackFromWasm(path string) ([]byte, error) {
- fmt.Printf("Attempting to load asset from WASM: %s\n", path)
-
- done := make(chan struct{})
- var result []byte
- var err error
-
- js.Global().Call("fetch", path).Call("then", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-  response := args[0]
-  // Check if the response is OK
-  if !response.Get("ok").Bool() {
-   err = fmt.Errorf("HTTP error, status %d", response.Get("status").Int())
-   close(done)
-   return nil
-  }
-
-  // Convert response to ArrayBuffer
-  response.Call("arrayBuffer").Call("then", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-   jsArrayBuffer := args[0]
-   jsUint8Array := js.Global().Get("Uint8Array").New(jsArrayBuffer)
-
-   // Convert to Go slice
-   result = make([]byte, jsUint8Array.Get("length").Int())
-   js.CopyBytesToGo(result, jsUint8Array)
-   close(done)
-   return nil
-  })).Call("catch", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-   err = fmt.Errorf("failed to convert response to array buffer: %v", args[0].String())
-   close(done)
-   return nil
-  }))
-  return nil
- })).Call("catch", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-  err = fmt.Errorf("fetch error: %v", args[0].String())
-  close(done)
-  return nil
- }))
-
- <-done
-
- if err != nil {
-  return nil, err
- }
-
- fmt.Printf("Fetched data length: %d, first 10 bytes: %v, last 10 bytes: %v\n", len(result), result[:10], result[len(result)-10:])
-
- // Clean binary data if necessary
- cleanedData := cleanBinaryData(result)
-
- return cleanedData, nil
+assets := []assetpacker.Asset{
+	{Path: "sprites/player.png", Type: "image", SourcePath: "raw/player.png"},
+	{Path: "maps/level1.json", Type: "json", Content: []byte(`{"level":1}`)},
 }
 
-// Clean up the binary data by removing Unicode Replacement Characters
-func cleanBinaryData(data []byte) []byte {
- var clean []byte
- for i := 0; i < len(data); {
-  if i+2 < len(data) && data[i] == 239 && data[i+1] == 191 && data[i+2] == 189 {
-   // Skip the three bytes representing the replacement character
-   i += 3
-  } else {
-   clean = append(clean, data[i])
-   i++
-  }
- }
- return clean
+if err := assetpacker.PackAssets(assets, "game_assets.pak", key); err != nil {
+	log.Fatal(err)
 }
 ```
 
-The HTML script:
+### Reading Assets Lazily
 
-```html
-<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <title>Your Game</title>
-  </head>
-  <body>
-    <script src="wasm_exec.js"></script>
-    <script>
-      console.log(
-        "Go object:",
-        typeof Go !== "undefined" ? "Go exists" : "Go is not defined"
-      );
-      const go = new Go();
-      WebAssembly.instantiateStreaming(fetch("yourgame.wasm"), go.importObject)
-        .then((result) => {
-          go.run(result.instance);
-        })
-        .catch((err) => {
-          console.error("Failed to load WASM module:", err);
-        });
-    </script>
-  </body>
-</html>
+```go
+reader, err := assetpacker.NewAssetReader(
+	"game_assets.pak",
+	key,
+	assetpacker.WithCache(false), // lazy reads with minimal memory footprint
+	assetpacker.WithMaxUncompressedSize(64<<20),
+)
+if err != nil {
+	log.Fatal(err)
+}
+defer reader.Close()
+
+sprite, err := reader.GetAsset("sprites/player.png")
+if err != nil {
+	log.Fatal(err)
+}
+_ = sprite.Content
+```
+
+## `io/fs.FS` Dev-Mode Hot-Reload Pattern
+
+Because `*assetpacker.AssetReader` implements `io/fs.FS`, your game loader can accept an `fs.FS` and seamlessly switch between loose files on disk during development and an encrypted `.pak` archive in production:
+
+```go
+func openAssetFS(devMode bool, pakPath string, key []byte) (fs.FS, func() error, error) {
+	if devMode {
+		// Edit sprites/maps on disk and reload immediately without repacking.
+		return os.DirFS("assets"), func() error { return nil }, nil
+	}
+
+	reader, err := assetpacker.NewAssetReader(pakPath, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reader, reader.Close, nil
+}
+```
+
+## Official CLI (`cmd/assetpacker`)
+
+Three subcommands are provided: `pack`, `list`, and `verify`.
+
+Provide the AES key using exactly one of:
+- `-key-env NAME`: read key from environment variable `NAME` (recommended)
+- `-key-file PATH`: read key from a file
+- `-key VALUE`: raw key string (16, 24, or 32 bytes)
+
+```sh
+# Pack an assets folder into game_assets.pak
+assetpacker pack -src ./assets -out ./build/game_assets.pak -key-env GAME_ASSET_KEY -v
+
+# List entries in the archive
+assetpacker list -in ./build/game_assets.pak -key-env GAME_ASSET_KEY -v
+
+# Decrypt and verify GCM integrity of every asset
+assetpacker verify -in ./build/game_assets.pak -key-env GAME_ASSET_KEY -v
+```
+
+### VS Code Task Example (`.vscode/tasks.json`)
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Pack Game Assets",
+      "type": "shell",
+      "command": "assetpacker",
+      "args": [
+        "pack",
+        "-src", "${workspaceFolder}/assets",
+        "-out", "${workspaceFolder}/build/game_assets.pak",
+        "-exclude", "*.aseprite,.DS_Store,Thumbs.db",
+        "-key-env", "GAME_ASSET_KEY",
+        "-v"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}
+```
+
+## WASM Usage
+
+In Go WebAssembly (`GOOS=js GOARCH=wasm`), fetch the archive as an `ArrayBuffer`, copy raw bytes directly with `js.CopyBytesToGo` (never modify or "clean" binary ciphertext), and release all `js.Func` callbacks to prevent memory leaks:
+
+```go
+//go:build js && wasm
+
+package main
+
+import (
+	"fmt"
+	"syscall/js"
+
+	"github.com/edwinsyarief/assetpacker"
+)
+
+func loadAssetPackFromWasm(url string, key []byte) (*assetpacker.AssetReader, error) {
+	type fetchResult struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan fetchResult, 1)
+
+	var onFetch, onFetchErr, onBuf, onBufErr js.Func
+	releaseAll := func() {
+		onFetch.Release()
+		onFetchErr.Release()
+		onBuf.Release()
+		onBufErr.Release()
+	}
+
+	onBuf = js.FuncOf(func(this js.Value, args []js.Value) any {
+		u8 := js.Global().Get("Uint8Array").New(args[0])
+		data := make([]byte, u8.Get("length").Int())
+		js.CopyBytesToGo(data, u8)
+		ch <- fetchResult{data: data}
+		return nil
+	})
+	onBufErr = js.FuncOf(func(this js.Value, args []js.Value) any {
+		ch <- fetchResult{err: fmt.Errorf("arrayBuffer failed: %v", args[0])}
+		return nil
+	})
+	onFetch = js.FuncOf(func(this js.Value, args []js.Value) any {
+		resp := args[0]
+		if !resp.Get("ok").Bool() {
+			ch <- fetchResult{err: fmt.Errorf("HTTP %d", resp.Get("status").Int())}
+			return nil
+		}
+		resp.Call("arrayBuffer").Call("then", onBuf).Call("catch", onBufErr)
+		return nil
+	})
+	onFetchErr = js.FuncOf(func(this js.Value, args []js.Value) any {
+		ch <- fetchResult{err: fmt.Errorf("fetch failed: %v", args[0])}
+		return nil
+	})
+
+	js.Global().Call("fetch", url).Call("then", onFetch).Call("catch", onFetchErr)
+
+	res := <-ch
+	releaseAll()
+	if res.err != nil {
+		return nil, res.err
+	}
+
+	return assetpacker.NewAssetReaderFromBytes(res.data, key)
+}
+```
+
+## Binary Format (`APAK` v2)
+
+All multi-byte integers are little-endian:
+
+```text
++-------------------------------------------------------------------+
+| Header (8 bytes)                                                  |
+|   Magic:   "APAK" (4 bytes)                                       |
+|   Version: uint16 = 2                                             |
+|   Flags:   uint16 = 0                                             |
++-------------------------------------------------------------------+
+| Encrypted Entry Payloads (sequential)                             |
+|   Entry i: nonce (12 B) || AES-GCM(payload, AAD = entry metadata) |
++-------------------------------------------------------------------+
+| Encrypted Footer TOC                                              |
+|   nonce (12 B) || AES-GCM(TOC bytes, AAD = "APAK-TOC-v2")         |
++-------------------------------------------------------------------+
+| Trailer (16 bytes)                                                |
+|   tocOffset:    uint64                                            |
+|   tocCipherLen: uint32                                            |
+|   Magic:        "APAK" (4 bytes)                                  |
++-------------------------------------------------------------------+
 ```
